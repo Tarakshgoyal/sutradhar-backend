@@ -6,11 +6,27 @@ Run as a standalone process:
 
 import json
 import logging
+import selectors
 import signal
 import time
 
 import redis
 from kafka import KafkaConsumer
+
+# ── Python 3.12+ / kafka-python-ng compatibility fix ──────────────────────────
+# kafka-python-ng tries to unregister already-closed sockets from the selector,
+# which raises ValueError("Invalid file descriptor: -1") on Python 3.12+.
+# Swallow that specific error so the consumer keeps running.
+_orig_unregister = selectors.DefaultSelector.unregister
+
+def _safe_unregister(self, fileobj):
+    try:
+        return _orig_unregister(self, fileobj)
+    except ValueError:
+        pass
+
+selectors.DefaultSelector.unregister = _safe_unregister
+# ──────────────────────────────────────────────────────────────────────────────
 
 from config import (
     KAFKA_BOOTSTRAP_SERVERS,

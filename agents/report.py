@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import JsonOutputParser
-from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 from neo4j import GraphDatabase
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -161,9 +161,9 @@ class ReportAgent:
     """
 
     def __init__(self, model: str = "openai/gpt-oss-20b"):
-        self.llm = ChatGroq(model_name=model, temperature=0.3, max_tokens=4096)
-        self.weight_llm = ChatGroq(
-            model_name=model, temperature=0.1, max_tokens=2048,
+        self.llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.3, num_predict=4096)
+        self.weight_llm = ChatOllama(
+            model="gpt-oss:120b-cloud", temperature=0.1, num_predict=2048,
         ).with_structured_output(DomainWeights, method="json_schema")
         self.driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
         self.parser = JsonOutputParser(pydantic_object=DomainBriefing)

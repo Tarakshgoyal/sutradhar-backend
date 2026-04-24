@@ -7,11 +7,13 @@ Open-Meteo provides free weather data with no API key required:
 """
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timezone
 
 import numpy as np
 import openmeteo_requests
+import requests
 import requests_cache
 from retry_requests import retry
 import pandas as pd
@@ -289,6 +291,106 @@ class WeatherScraper:
                 })
 
         return pd.DataFrame(records)
+
+    # ── Live weather (OpenWeatherMap) ────────────────────────────────
+
+    OWM_URL = "https://api.openweathermap.org/data/2.5/weather"
+
+    def fetch_live_current(self, city: City, api_key: str) -> dict | None:
+        """Fetch live current conditions for one city from OpenWeatherMap.
+
+        Returns a dict with standardised keys, or None on failure.
+        OWM updates current data every ~10 minutes.
+        """
+        try:
+            resp = requests.get(
+                self.OWM_URL,
+                params={
+                    "lat": city.lat,
+                    "lon": city.lon,
+                    "appid": api_key,
+                    "units": "metric",   # °C, m/s
+                },
+                timeout=10,
+            )
+            resp.raise_for_status()
+            raw = resp.json()
+
+            main = raw.get("main", {})
+            wind = raw.get("wind", {})
+            weather_list = raw.get("weather", [{}])
+            clouds = raw.get("clouds", {})
+            sys_data = raw.get("sys", {})
+
+            return {
+                "city": city.name,
+                "lat": city.lat,
+                "lon": city.lon,
+                # Temperatures (°C)
+                "temperature": main.get("temp"),
+                "feels_like": main.get("feels_like"),
+                "temperature_min": main.get("temp_min"),
+                "temperature_max": main.get("temp_max"),
+                # Atmosphere
+                "humidity": main.get("humidity"),        # %
+                "pressure": main.get("pressure"),        # hPa
+                "visibility": raw.get("visibility"),     # metres
+                # Wind
+                "wind_speed": wind.get("speed"),         # m/s
+                "wind_deg": wind.get("deg"),
+                "wind_gust": wind.get("gust"),           # m/s (if available)
+                # Precipitation (last 1h / 3h in mm — present only if it's raining)
+                "rain_1h": raw.get("rain", {}).get("1h"),
+                "snow_1h": raw.get("snow", {}).get("1h"),
+                # Clouds & condition
+                "cloudiness": clouds.get("all"),         # %
+                "weather_id": weather_list[0].get("id"),
+                "weather_main": weather_list[0].get("main"),     # e.g. "Rain"
+                "weather_description": weather_list[0].get("description"),
+                "weather_icon": weather_list[0].get("icon"),
+                # Sun
+                "sunrise": datetime.fromtimestamp(sys_data["sunrise"], tz=timezone.utc).isoformat()
+                           if sys_data.get("sunrise") else None,
+                "sunset": datetime.fromtimestamp(sys_data["sunset"], tz=timezone.utc).isoformat()
+                          if sys_data.get("sunset") else None,
+                # Metadata
+                "observed_at": datetime.fromtimestamp(raw["dt"], tz=timezone.utc).isoformat()
+                               if raw.get("dt") else None,
+                "fetched_at": datetime.now(timezone.utc).isoformat(),
+            }
+        except requests.HTTPError as e:
+            logger.warning(f"OWM HTTP error for {city.name}: {e}")
+        except Exception as e:
+            logger.warning(f"OWM fetch failed for {city.name}: {e}")
+        return None
+
+    def fetch_all_cities_live(self, api_key: str, max_workers: int = 10) -> list[dict]:
+        """Fetch live current conditions for all 25 cities in parallel.
+
+        Uses ThreadPoolExecutor — OWM free tier allows 60 calls/min,
+        which is more than enough for 25 concurrent requests.
+
+        Returns list of city weather dicts (failed cities omitted).
+        """
+        results: list[dict] = []
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(self.fetch_live_current, city, api_key): city.name
+                for city in INDIA_CITIES
+            }
+            for future in as_completed(futures):
+                city_name = futures[future]
+                try:
+                    data = future.result()
+                    if data:
+                        results.append(data)
+                except Exception as e:
+                    logger.warning(f"Live fetch failed for {city_name}: {e}")
+
+        # Sort alphabetically for consistent ordering
+        results.sort(key=lambda r: r["city"])
+        logger.info(f"Live weather fetched: {len(results)}/{len(INDIA_CITIES)} cities")
+        return results
 
     # ── Internal helpers ─────────────────────────────────────────────
 

@@ -16,7 +16,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -57,7 +57,7 @@ class DisinfoDetector:
     """
 
     def __init__(self, model: str = "openai/gpt-oss-20b"):
-        self.llm = ChatGroq(model_name=model, temperature=0.2, max_tokens=1024)
+        self.llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2, num_predict=1024)
         logger.info("DisinfoDetector initialized")
 
     # ── Layer 1: Coordinated narrative detection ───────────────────────────────

@@ -14,7 +14,7 @@ import time
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import JsonOutputParser
-from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 from neo4j import GraphDatabase
 from pydantic import BaseModel, Field
 
@@ -99,7 +99,7 @@ class IndiaImpactAgent:
     """Analyzes domain briefings from India's strategic perspective."""
 
     def __init__(self, model: str = "openai/gpt-oss-20b"):
-        self.llm = ChatGroq(model_name=model, temperature=0.3, max_tokens=8192)
+        self.llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.3, num_predict=8192)
         self.parser = JsonOutputParser(pydantic_object=IndiaImpactAnalysis)
         self.driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
         logger.info("IndiaImpactAgent initialized")

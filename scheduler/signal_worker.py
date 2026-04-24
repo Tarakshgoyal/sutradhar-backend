@@ -44,6 +44,14 @@ from models.detected_signal import DetectedSignal
 from models.scraped_article import ScrapedArticle
 from sqlalchemy import select, func, and_
 
+# SignalSwarm augments the statistical detectors
+_SIGNAL_SWARM_AVAILABLE = False
+try:
+    from swarm.signal_swarm import SignalSwarm
+    _SIGNAL_SWARM_AVAILABLE = True
+except ImportError:
+    pass
+
 logger = logging.getLogger(__name__)
 
 # ── pub_date parser (mirrors graph.py _PARSE_DATE_CYPHER) ────────────────────
@@ -73,8 +81,8 @@ _PARSE_PUB_DATE = """
 # Signal A / B: entity mention thresholds
 ENTITY_SPIKE_WINDOW_HOURS = 2        # current window size
 ENTITY_SPIKE_RATIO_THRESHOLD = 3.0   # (smoothed) ratio to call it a spike
-ENTITY_MIN_BASELINE_MENTIONS = 8     # skip entities with thin history
-ENTITY_MIN_CURRENT_MENTIONS = 3      # single article never fires
+ENTITY_MIN_BASELINE_MENTIONS = 2     # skip entities with thin history
+ENTITY_MIN_CURRENT_MENTIONS = 1      # single article never fires
 LAPLACE_SMOOTH = 1.0                 # denominator smoothing
 
 # Signal B: new entity connectivity
@@ -84,8 +92,8 @@ NEW_ENTITY_MIN_DEGREE = 5            # min graph connections to be notable
 # Signal C: topic cluster thresholds
 TOPIC_SPIKE_WINDOW_HOURS = 6         # wider window smooths scraper-batch noise
 TOPIC_SPIKE_RATIO_THRESHOLD = 2.5
-TOPIC_MIN_BASELINE_ARTICLES = 5      # skip low-volume clusters
-TOPIC_MIN_CURRENT_ARTICLES = 3
+TOPIC_MIN_BASELINE_ARTICLES = 1      # skip low-volume clusters
+TOPIC_MIN_CURRENT_ARTICLES = 1
 TOPIC_MIN_CLUSTER_AGE_HOURS = 3      # brand-new cluster can't "spike"
 
 # How long a detected signal stays visible in the API
@@ -420,6 +428,37 @@ def _publish_signals(r: redis.Redis, signals: list[dict]) -> None:
         logger.debug(f"Failed to publish signal notification: {e}")
 
 
+# ── On-demand detection (used by API /signals/refresh) ───────────────────────
+
+def run_detection_cycle() -> int:
+    """Run a single detection cycle and persist results. Returns count of signals."""
+    from neo4j import GraphDatabase
+    import redis as redis_lib
+    neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
+    redis_client = redis_lib.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+    db = SessionLocal()
+    try:
+        all_signals: list[dict] = []
+        try:
+            all_signals += _detect_entity_spikes(neo4j_driver)
+        except Exception as e:
+            logger.warning(f"entity_spike: {e}")
+        try:
+            all_signals += _detect_new_entities(neo4j_driver)
+        except Exception as e:
+            logger.warning(f"new_entity: {e}")
+        try:
+            all_signals += _detect_topic_spikes(db)
+        except Exception as e:
+            logger.warning(f"topic_spike: {e}")
+        count = _persist_signals(db, all_signals)
+        _publish_signals(redis_client, all_signals)
+        return count
+    finally:
+        db.close()
+        neo4j_driver.close()
+
+
 # ── Main loop ─────────────────────────────────────────────────────────────────
 
 def main():
@@ -437,8 +476,18 @@ def main():
     neo4j_driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
     redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 
+    # Initialize signal swarm if available
+    signal_swarm = None
+    if _SIGNAL_SWARM_AVAILABLE:
+        try:
+            signal_swarm = SignalSwarm(neo4j_driver, redis_client)
+            logger.info("[SignalSwarm] Bee-algorithm swarm initialized (scouts + workers + reporter)")
+        except Exception as e:
+            logger.warning(f"[SignalSwarm] Failed to initialize: {e}")
+
     logger.info("=" * 60)
     logger.info("Starting Signal Worker")
+    logger.info(f"  Mode: {'Swarm (bee-algorithm) + Statistical' if signal_swarm else 'Statistical only'}")
     logger.info(f"  Interval: {SIGNAL_WORKER_INTERVAL_SECONDS}s")
     logger.info(f"  Signal TTL: {SIGNAL_TTL_HOURS}h")
     logger.info("=" * 60)
@@ -450,6 +499,7 @@ def main():
             try:
                 all_signals: list[dict] = []
 
+                # ── Statistical detectors (existing) ─────────────────────────
                 try:
                     all_signals += _detect_entity_spikes(neo4j_driver)
                 except Exception as e:
@@ -472,6 +522,31 @@ def main():
                 except Exception as e:
                     logger.error(f"disinfo detection failed: {e}", exc_info=True)
 
+                # ── Swarm detectors (bee-algorithm augmentation) ──────────────
+                if signal_swarm:
+                    try:
+                        logger.info("=" * 60)
+                        logger.info("SWARM C: Signal Detection Swarm (bee-algorithm)")
+                        logger.info("=" * 60)
+                        swarm_signals = signal_swarm.run()
+                        # Merge: swarm signals that aren't already covered by stats
+                        existing_keys = {
+                            f"{s['signal_type']}::{s.get('entity_name') or s.get('cluster_id', '')}"
+                            for s in all_signals
+                        }
+                        new_from_swarm = [
+                            s for s in swarm_signals
+                            if f"{s['signal_type']}::{s.get('entity_name') or s.get('cluster_id', '')}"
+                            not in existing_keys
+                        ]
+                        all_signals += new_from_swarm
+                        logger.info(
+                            f"[SignalSwarm] +{len(new_from_swarm)} new signals "
+                            f"({len(swarm_signals) - len(new_from_swarm)} duplicates merged)"
+                        )
+                    except Exception as e:
+                        logger.error(f"SignalSwarm failed: {e}", exc_info=True)
+
                 count = _persist_signals(db, all_signals)
                 _publish_signals(redis_client, all_signals)
 
@@ -490,6 +565,8 @@ def main():
             while not _shutdown and time.time() < sleep_end:
                 time.sleep(5)
     finally:
+        if signal_swarm:
+            signal_swarm.close()
         neo4j_driver.close()
         redis_client.close()
         logger.info("Signal worker shut down.")

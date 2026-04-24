@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_core.output_parsers import JsonOutputParser
-from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 from neo4j import GraphDatabase
 from pydantic import BaseModel, Field
 
@@ -120,7 +120,7 @@ class InferenceAgent:
     """
 
     def __init__(self, model: str = "openai/gpt-oss-20b", entity_classifier=None):
-        self.llm = ChatGroq(model_name=model, temperature=0.3, max_tokens=4096)
+        self.llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.3, num_predict=4096)
         self.driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
         self.parser = JsonOutputParser(pydantic_object=InferenceAnalysis)
         self.entity_classifier = entity_classifier

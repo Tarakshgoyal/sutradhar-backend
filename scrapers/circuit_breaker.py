@@ -33,6 +33,15 @@ import redis as redis_lib
 logger = logging.getLogger(__name__)
 
 
+def _as_text(value) -> Optional[str]:
+    """Normalize Redis values to text for both bytes and decode_responses=True clients."""
+    if value is None:
+        return None
+    if isinstance(value, bytes):
+        return value.decode()
+    return str(value)
+
+
 class CBState(str, Enum):
     CLOSED = "closed"
     OPEN = "open"
@@ -67,7 +76,7 @@ class CircuitBreaker:
         raw = self.redis.get(self._key_state)
         if raw is None:
             return CBState.CLOSED
-        state = CBState(raw.decode())
+        state = CBState(_as_text(raw))
         if state == CBState.OPEN:
             # Check if we should transition to HALF_OPEN
             opened_at = self.redis.get(self._key_opened_at)

@@ -14,7 +14,7 @@ from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 from neo4j import GraphDatabase
 from sqlalchemy import select, desc
 
@@ -33,7 +33,7 @@ class PolicyBriefAgent:
     """Generates structured intelligence documents for decision-makers."""
 
     def __init__(self, model: str = "openai/gpt-oss-20b"):
-        self.llm = ChatGroq(model_name=model, temperature=0.4, max_tokens=4096)
+        self.llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.4, num_predict=4096)
         self.driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
         logger.info("PolicyBriefAgent initialized")
 

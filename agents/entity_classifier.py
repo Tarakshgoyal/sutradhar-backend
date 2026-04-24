@@ -8,7 +8,7 @@ import logging
 from typing import Dict, List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy import select
-from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from models.entity_type_domain_mapping import EntityTypeDomainMapping
@@ -26,7 +26,7 @@ class EntityClassifier:
 
     def __init__(self, db_session: Session, llm_model: str = "llama-3.3-70b-versatile"):
         self.db = db_session
-        self.llm = ChatGroq(model_name=llm_model, temperature=0.1, max_tokens=256)
+        self.llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.1, num_predict=256)
         self._cache: Dict[str, Dict] = {}
 
     def get_classification(self, entity_type: str) -> Dict[str, any]:

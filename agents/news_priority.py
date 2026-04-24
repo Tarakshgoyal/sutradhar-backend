@@ -24,7 +24,7 @@ from typing import Optional
 import numpy as np
 import redis
 from langchain_core.messages import HumanMessage, SystemMessage
-from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 from pydantic import BaseModel, Field
 from sentence_transformers import SentenceTransformer
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -155,7 +155,7 @@ class NewsPriorityAgent:
         db_session=None,
     ):
         self.embedder = SentenceTransformer(embedding_model)
-        self.llm = ChatGroq(model=model).with_structured_output(ArticleImportance)
+        self.llm = ChatOllama(model="gpt-oss:120b-cloud").with_structured_output(ArticleImportance)
         self.r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
 
         # Initialize database session and scoring config

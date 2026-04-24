@@ -99,16 +99,23 @@ def list_news(
 def top_news(
     limit: int = Query(10, ge=1, le=100),
     hours: int = Query(24, ge=1, le=168),
+    domain: Optional[str] = Query(None, description="Domain filter, e.g. geopolitics"),
 ):
     """Top N articles by importance score in the last N hours."""
     db = SessionLocal()
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-        articles = db.scalars(
+        stmt = (
             select(ScrapedArticle)
             .where(ScrapedArticle.scraped_at >= cutoff)
             .where(ScrapedArticle.importance_score.isnot(None))
-            .order_by(desc(ScrapedArticle.importance_score))
+        )
+        if domain:
+            stmt = stmt.where(ScrapedArticle.domain == domain)
+
+        articles = db.scalars(
+            stmt
+            .order_by(desc(ScrapedArticle.importance_score), desc(ScrapedArticle.scraped_at))
             .limit(limit)
         ).all()
         return {"articles": [_article_to_dict(a) for a in articles]}

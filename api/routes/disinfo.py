@@ -101,6 +101,8 @@ class DisinfoSignalOut(BaseModel):
 def get_disinfo_signals(
     signal_type: Optional[str] = Query(None, description="Filter by signal_type"),
     severity: Optional[str] = Query(None, description="Filter by severity (high/medium/low)"),
+    domain: Optional[str] = Query(None, description="Filter by target domain, e.g. geopolitics"),
+    hours: Optional[int] = Query(None, ge=1, le=720, description="Only include signals detected in the last N hours"),
     limit: int = Query(50, ge=1, le=200),
 ):
     """Return active disinformation and information operation signals."""
@@ -110,10 +112,15 @@ def get_disinfo_signals(
         query = select(DisinfoSignal).where(
             (DisinfoSignal.expires_at > now) | DisinfoSignal.expires_at.is_(None)
         )
+        if hours is not None:
+            cutoff = now - timedelta(hours=hours)
+            query = query.where(DisinfoSignal.detected_at >= cutoff)
         if signal_type:
             query = query.where(DisinfoSignal.signal_type == signal_type)
         if severity:
             query = query.where(DisinfoSignal.severity == severity)
+        if domain:
+            query = query.where(DisinfoSignal.target_domain == domain)
         query = query.order_by(desc(DisinfoSignal.detected_at)).limit(limit)
         rows = db.scalars(query).all()
         return [

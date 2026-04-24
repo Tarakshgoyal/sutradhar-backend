@@ -136,6 +136,34 @@ def get_graph(
         """, all_ids=all_ids).single()
         edges = edge_result["edges"] if edge_result else []
 
+        # Step 3b: Article co-occurrence edges — Person/Org ↔ Country
+        # When no direct RELATES_TO edge exists, articles that mention both
+        # a non-country entity and a country imply a real-world association.
+        cooc_result = session.run("""
+            MATCH (art:Article)-[:EVIDENCES]->(p:Entity)
+            MATCH (art)-[:EVIDENCES]->(c:Entity {type: 'Country'})
+            WHERE elementId(p) IN $entity_ids
+              AND elementId(c) IN $entity_ids
+              AND p <> c
+              AND NOT p.type = 'Country'
+            WITH p, c, count(DISTINCT art) AS co_count
+            WHERE co_count >= 1
+            RETURN elementId(p) AS from_id,
+                   elementId(c) AS to_id,
+                   co_count
+        """, entity_ids=entity_ids).data()
+
+        cooc_edges = [
+            {
+                "from": row["from_id"],
+                "to": row["to_id"],
+                "type": "CO_MENTIONED",
+                "props": {"type": "co-mentioned", "co_count": row["co_count"]},
+            }
+            for row in cooc_result
+        ]
+        edges = edges + cooc_edges
+
         # Step 4: Attach source articles to nodes (single batched query)
         all_nodes = entity_nodes + event_nodes
 

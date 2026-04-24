@@ -36,6 +36,11 @@ dependencies = [
     "indic-transliteration>=2.3.79",
     "geopy>=2.4.1",
     "rapidfuzz>=3.14.3",
+    "passlib[bcrypt]>=1.7.4",
+    "python-jose[cryptography]>=3.5.0",
+    "python-multipart>=0.0.26",
+    "pydantic[email]>=2.12.5",
+    "email-validator>=2.3.0",
 ]
 
 [dependency-groups]

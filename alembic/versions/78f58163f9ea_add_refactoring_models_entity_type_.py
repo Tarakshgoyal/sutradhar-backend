@@ -107,10 +107,10 @@ def upgrade() -> None:
     op.create_index(op.f('ix_weather_thresholds_city'), 'weather_thresholds', ['city'], unique=False)
     op.create_index(op.f('ix_weather_thresholds_threshold_type'), 'weather_thresholds', ['threshold_type'], unique=False)
     op.create_index(op.f('ix_weather_thresholds_zone'), 'weather_thresholds', ['zone'], unique=False)
-    op.drop_index(op.f('ix_detected_signals_detected_at'), table_name='detected_signals')
-    op.drop_index(op.f('ix_detected_signals_expires_at'), table_name='detected_signals')
-    op.drop_index(op.f('ix_detected_signals_signal_type'), table_name='detected_signals')
-    op.drop_table('detected_signals')
+    op.drop_index(op.f('ix_detected_signals_detected_at'), table_name='detected_signals', if_exists=True)
+    op.drop_index(op.f('ix_detected_signals_expires_at'), table_name='detected_signals', if_exists=True)
+    op.drop_index(op.f('ix_detected_signals_signal_type'), table_name='detected_signals', if_exists=True)
+    op.execute('DROP TABLE IF EXISTS detected_signals')
     # ### end Alembic commands ###
 
 

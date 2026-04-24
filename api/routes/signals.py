@@ -1,14 +1,14 @@
-"""Read-only API for anomaly signals.
+"""Anomaly signals API.
 
-All signals are pre-computed by the background signal_worker.
-This endpoint does zero computation — it only reads from Postgres.
+Signals are pre-computed by the background signal_worker every 15 minutes.
+The /refresh endpoint can trigger on-demand detection synchronously.
 """
 
 import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 from sqlalchemy import select, desc
 
 from models.database import SessionLocal
@@ -43,6 +43,7 @@ def list_signals(
         None, description="Filter by type: entity_spike, new_entity, topic_spike"
     ),
     severity: Optional[str] = Query(None, description="Filter by severity: high, medium"),
+    domain: Optional[str] = Query(None, description="Filter by domain: geopolitics, defense, economics, technology, climate, etc."),
     limit: int = Query(50, ge=1, le=200),
 ):
     """Active anomaly signals, sorted by spike ratio descending.
@@ -63,6 +64,8 @@ def list_signals(
             stmt = stmt.where(DetectedSignal.signal_type == signal_type)
         if severity:
             stmt = stmt.where(DetectedSignal.severity == severity)
+        if domain:
+            stmt = stmt.where(DetectedSignal.domain == domain)
 
         signals = db.scalars(stmt).all()
         return {
@@ -71,3 +74,19 @@ def list_signals(
         }
     finally:
         db.close()
+
+
+@router.post("/refresh")
+def refresh_signals():
+    """Run signal detection synchronously and return the new count.
+
+    This triggers the same detection logic used by the background worker,
+    useful for on-demand refreshes when the DB has freshly ingested articles.
+    """
+    try:
+        from scheduler.signal_worker import run_detection_cycle
+        count = run_detection_cycle()
+        return {"status": "ok", "signals_detected": count}
+    except Exception as exc:
+        logger.error(f"Signal refresh failed: {exc}")
+        raise HTTPException(status_code=500, detail=str(exc))

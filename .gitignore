@@ -9,10 +9,36 @@ wheels/
 # Virtual environments
 .venv
 
-
-
+# Environment & secrets
 .env
+*.env
+
+# Neo4j data volumes (can be large / local only)
+neo4j-data/
+
+# SQLite caches
+*.db
+*.sqlite
 .weather_cache.sqlite
-.DS_Store
-logs
+
+# Logs & runtime files
+logs/
+*.log
 .run_all_pids
+
+# Local results / notebooks output
+results.json
+notebooks/*.ipynb
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+
+# Large data directories
+countries/
+graphs/
+scripts/__pycache__/

@@ -8,7 +8,7 @@ Classifies whether an entity's involvement in a scenario represents:
 
 import logging
 from typing import Dict, Optional
-from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 from langchain_core.messages import SystemMessage, HumanMessage
 import json
 
@@ -75,7 +75,7 @@ class ImpactDirectionClassifier:
     def __init__(self, llm_model: str = "llama-3.3-70b-versatile", enable_llm: bool = True):
         self.enable_llm = enable_llm
         if enable_llm:
-            self.llm = ChatGroq(model_name=llm_model, temperature=0.2, max_tokens=256)
+            self.llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0.2, num_predict=256)
         self._cache: Dict[str, str] = {}
 
     def classify(

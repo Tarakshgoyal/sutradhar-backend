@@ -12,8 +12,9 @@ from models.database import SessionLocal
 from models.weather_observation import WeatherObservation
 from models.weather_anomaly import WeatherAnomalyRecord
 from models.climate_normal import ClimateNormal
-from scrapers.weather import INDIA_CITIES, CITY_BY_NAME
+from scrapers.weather import INDIA_CITIES, CITY_BY_NAME, WeatherScraper
 from agents.weather_anomaly import WeatherTrendAnalyzer
+from config import OPENWEATHERMAP_API_KEY
 
 logger = logging.getLogger(__name__)
 
@@ -104,6 +105,57 @@ def _load_normals(city: str) -> pd.DataFrame:
 
 
 # ── Endpoints ────────────────────────────────────────────────────────
+
+
+@router.get("/weather/live")
+def get_live_weather(
+    city: Optional[str] = Query(None, description="Filter to a single city (default: all 25)"),
+):
+    """Live current weather for all 25 monitored Indian cities via OpenWeatherMap.
+
+    Data is fetched directly from OWM in real-time (updated every ~10 minutes).
+    Unlike /weather/current which reads from the database, this endpoint always
+    returns the freshest available conditions.
+    """
+    if not OPENWEATHERMAP_API_KEY:
+        raise HTTPException(
+            status_code=503,
+            detail="OpenWeatherMap API key not configured (set OPENWEATHERMAP_API_KEY in .env)"
+        )
+
+    scraper = WeatherScraper()
+
+    if city:
+        city_obj = CITY_BY_NAME.get(city)
+        if not city_obj:
+            raise HTTPException(status_code=404, detail=f"Unknown city: {city}")
+        data = scraper.fetch_live_current(city_obj, OPENWEATHERMAP_API_KEY)
+        if not data:
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    f"Failed to fetch live weather for {city}. "
+                    "If your OWM key was just created, it can take up to 2 hours to activate. "
+                    "Check https://openweathermap.org/faq#error401"
+                )
+            )
+        return {"observations": [data], "count": 1, "source": "openweathermap"}
+
+    observations = scraper.fetch_all_cities_live(OPENWEATHERMAP_API_KEY)
+    if not observations:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "OpenWeatherMap returned no data. "
+                "New API keys take up to 2 hours to activate after creation. "
+                "Check https://openweathermap.org/faq#error401"
+            )
+        )
+    return {
+        "observations": observations,
+        "count": len(observations),
+        "source": "openweathermap",
+    }
 
 
 @router.get("/weather/cities")

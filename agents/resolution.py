@@ -2,7 +2,6 @@ import logging
 import re
 from collections import defaultdict
 
-from langchain_groq import ChatGroq
 import numpy as np
 from langchain_ollama import ChatOllama
 from sentence_transformers import SentenceTransformer
@@ -34,8 +33,7 @@ class ResolutionAgent:
     """
 
     def __init__(self, model: str = "openai/gpt-oss-20b", embedding_model: str = "all-MiniLM-L6-v2"):
-        # self.llm = ChatOllama(model=model).with_structured_output(ResolutionBatch)
-        self.llm = ChatGroq(model=model).with_structured_output(ResolutionBatch)
+        self.llm = ChatOllama(model="gpt-oss:120b-cloud").with_structured_output(ResolutionBatch)
         self.embedder = SentenceTransformer(embedding_model)
         self._load_merge_table()
 
@@ -179,13 +177,16 @@ class ResolutionAgent:
                 for j in range(i + 1, len(unique_names)):
                     sim = float(sim_matrix[i][j])
                     if sim > 0.95:
-                        longer = unique_names[i] if len(unique_names[i]) >= len(unique_names[j]) else unique_names[j]
-                        shorter = unique_names[j] if longer == unique_names[i] else unique_names[i]
-                        self._save_alias(shorter, longer, etype, "tier2", confidence=sim)
+                        # Canonical = shorter name (e.g. "India" wins over "Republic of India")
+                        # Exception: if one name is a known acronym keep the longer full form
+                        a, b = unique_names[i], unique_names[j]
+                        canonical = a if len(a) <= len(b) else b
+                        alias    = b if canonical == a else a
+                        self._save_alias(alias, canonical, etype, "tier2", confidence=sim)
                         for e in group:
-                            if e.name == shorter:
-                                e.name = longer
-                        logger.debug(f"Tier2 auto-merge: '{shorter}' → '{longer}' (sim={sim:.3f})")
+                            if e.name == alias:
+                                e.name = canonical
+                        logger.debug(f"Tier2 auto-merge: '{alias}' → '{canonical}' (sim={sim:.3f})")
                     elif sim > 0.80:
                         candidates.append((unique_names[i], unique_names[j], etype, sim))
 

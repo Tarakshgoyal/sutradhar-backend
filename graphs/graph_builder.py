@@ -43,10 +43,23 @@ from agents.temporal import TemporalAgent
 
 logger = logging.getLogger(__name__)
 
+# Use swarm extraction when available, fall back to single-agent
+_SWARM_AVAILABLE = False
+try:
+    from swarm.extraction_swarm import ExtractionSwarm
+    _SWARM_AVAILABLE = True
+except ImportError:
+    pass
+
 
 class GraphBuilder:
     def __init__(self, model: str = "openai/gpt-oss-20b"):
-        self.extraction_agent = ExtractionAgent(model=model)
+        if _SWARM_AVAILABLE:
+            logger.info("[GraphBuilder] Using ExtractionSwarm (5-perspective consensus)")
+            self.extraction_agent = ExtractionSwarm(model=model)
+        else:
+            logger.info("[GraphBuilder] Using single ExtractionAgent (swarm unavailable)")
+            self.extraction_agent = ExtractionAgent(model=model)
         self.resolution_agent = ResolutionAgent(model=model)
         self.temporal_agent = TemporalAgent()
         self.driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)

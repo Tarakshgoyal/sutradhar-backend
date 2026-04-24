@@ -20,6 +20,7 @@ from typing import Optional
 
 import requests
 from rss_parser import RSSParser
+from requests.exceptions import SSLError, HTTPError
 
 from scrapers.circuit_breaker import CircuitBreaker
 
@@ -27,22 +28,38 @@ logger = logging.getLogger(__name__)
 
 _UTF8_BOM = b'\xef\xbb\xbf'
 
+_DEFAULT_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+    ),
+    "Accept": "application/rss+xml, application/xml, text/xml, */*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
 
 def _parse_rss(resp: requests.Response):
     """
     Parse an RSS feed response correctly.
 
-    requests defaults to latin-1 for 'text/xml' with no charset header, which
-    corrupts the UTF-8 BOM (\\xef\\xbb\\xbf → 'ï»¿') and breaks the XML parser.
-    We decode the raw bytes ourselves: strip BOM if present, then UTF-8 decode.
+    RSSParser expects bytes. Strip BOM if present before passing.
     """
-    content = resp.content
+    content = (resp.content or b"").lstrip()
     if content.startswith(_UTF8_BOM):
-        text = content[len(_UTF8_BOM):].decode('utf-8')
-    else:
-        encoding = resp.apparent_encoding or 'utf-8'
-        text = content.decode(encoding, errors='replace')
-    return RSSParser.parse(text)
+        content = content[len(_UTF8_BOM):]
+
+    content_type = (resp.headers.get("Content-Type", "") or "").lower()
+    sniff = content[:240].lstrip().lower()
+    if "json" in content_type or sniff.startswith(b"{") or sniff.startswith(b"["):
+        raise ValueError("received JSON instead of RSS/XML")
+    if "html" in content_type or sniff.startswith(b"<!doctype html") or sniff.startswith(b"<html"):
+        raise ValueError("received HTML instead of RSS/XML")
+
+    try:
+        return RSSParser.parse(content)
+    except Exception:
+        text_payload = content.decode(resp.encoding or "utf-8", errors="replace")
+        return RSSParser.parse(text_payload)
 
 _IST = timezone(timedelta(hours=5, minutes=30))
 
@@ -99,19 +116,47 @@ class BaseGovScraper(ABC):
         self.cb = circuit_breaker
         self.timeout = request_timeout
 
-    def _get(self, url: str, **kwargs) -> Optional[requests.Response]:
+    def _get(self, url: str, _allow_insecure_retry: bool = True, **kwargs) -> Optional[requests.Response]:
         """HTTP GET with circuit breaker guard."""
         if self.cb and not self.cb.can_request():
             logger.warning(
                 f"{self.source_name}: circuit OPEN — skipping {url[:80]}"
             )
             return None
+
+        req_headers = dict(_DEFAULT_HEADERS)
+        if "headers" in kwargs and kwargs["headers"]:
+            req_headers.update(kwargs.pop("headers"))
+
         try:
-            resp = requests.get(url, timeout=self.timeout, **kwargs)
+            resp = requests.get(url, timeout=self.timeout, headers=req_headers, **kwargs)
             resp.raise_for_status()
             if self.cb:
                 self.cb.record_success()
             return resp
+        except SSLError as e:
+            # Some gov sites intermittently serve expired cert chains.
+            if _allow_insecure_retry:
+                logger.warning(
+                    f"{self.source_name}: SSL verify failed for {url[:80]}; retrying once with verify=False"
+                )
+                return self._get(url, _allow_insecure_retry=False, verify=False)
+            logger.error(f"{self.source_name}: request failed {url[:80]}: {e}")
+            if self.cb:
+                self.cb.record_failure()
+            return None
+        except HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            # 404/410 on deprecated feeds are persistent endpoint issues, not transient outages.
+            if status in (404, 410):
+                logger.warning(
+                    f"{self.source_name}: feed unavailable ({status}) {url[:80]}"
+                )
+                return None
+            logger.error(f"{self.source_name}: request failed {url[:80]}: {e}")
+            if self.cb:
+                self.cb.record_failure()
+            return None
         except Exception as e:
             logger.error(f"{self.source_name}: request failed {url[:80]}: {e}")
             if self.cb:
@@ -137,11 +182,8 @@ class PIBScraper(BaseGovScraper):
     """
 
     PIB_FEEDS: list[tuple[str, str]] = [
+        # Only ModId=6 reliably returns RSS — all other ModIds redirect to error HTML
         ("PIB Top Stories", "https://pib.gov.in/RssMain.aspx?ModId=6&Lang=1&Regid=3"),
-        ("PIB Defence", "https://pib.gov.in/RssMain.aspx?ModId=7&Lang=1&Regid=3"),
-        ("PIB Finance", "https://pib.gov.in/RssMain.aspx?ModId=2&Lang=1&Regid=3"),
-        ("PIB External Affairs", "https://pib.gov.in/RssMain.aspx?ModId=3&Lang=1&Regid=3"),
-        ("PIB Science Tech", "https://pib.gov.in/RssMain.aspx?ModId=11&Lang=1&Regid=3"),
     ]
 
     def __init__(self, circuit_breaker: Optional[CircuitBreaker] = None):
@@ -170,7 +212,14 @@ class PIBScraper(BaseGovScraper):
                         fetched_at=datetime.now(_IST),
                     ))
             except Exception as e:
-                logger.error(f"PIB feed parse failed ({feed_url}): {e}")
+                content_type = resp.headers.get("Content-Type", "") if resp else ""
+                if "received HTML instead of RSS/XML" in str(e):
+                    logger.warning(
+                        f"PIB feed unavailable as RSS ({feed_url}) "
+                        f"[content-type={content_type}, final_url={resp.url}]"
+                    )
+                else:
+                    logger.error(f"PIB feed parse failed ({feed_url}): {e}")
         logger.info(f"PIB: fetched {len(docs)} documents")
         return docs
 
@@ -181,37 +230,44 @@ class MEAScraper(BaseGovScraper):
     """Ministry of External Affairs press releases RSS."""
 
     MEA_FEEDS: list[tuple[str, str]] = [
-        ("MEA Press Releases", "https://mea.gov.in/pressreleaselist.htm?dtl/rss"),
-        ("MEA Speeches", "https://mea.gov.in/speecheslist.htm?dtl/rss"),
+        # MEA no longer serves RSS or a stable JSON API.
+        # Their press releases are accessible via this search API endpoint:
+        ("MEA Press Releases", "https://www.mea.gov.in/press-releases.htm"),
+        ("MEA Speeches",       "https://www.mea.gov.in/Speeches-Statements.htm"),
     ]
 
     def __init__(self, circuit_breaker: Optional[CircuitBreaker] = None):
         super().__init__("MEA", circuit_breaker)
 
     def fetch(self) -> list[GovDocument]:
+        import re as _re
         docs: list[GovDocument] = []
         for feed_name, feed_url in self.MEA_FEEDS:
             resp = self._get(feed_url)
             if not resp:
                 continue
             try:
-                rss = _parse_rss(resp)
-                for item in rss.channel.items:
-                    url = item.links[0].content if item.links else None
-                    if not url:
+                html = resp.text
+                # Extract links that look like MEA press release detail pages
+                links = _re.findall(r'href=["\']([^"\']*(?:pressrelease|speech|statement)[^"\']*)["\']', html, _re.I)
+                seen_urls: set[str] = set()
+                for href in links[:30]:
+                    full_url = href if href.startswith("http") else f"https://www.mea.gov.in{href}"
+                    if full_url in seen_urls:
                         continue
+                    seen_urls.add(full_url)
+                    # Extract title from nearby text (best-effort)
+                    title = full_url.split("/")[-1].replace("-", " ").replace("_", " ").strip()
                     docs.append(GovDocument(
-                        url=url,
-                        title=item.title.content if item.title else "",
+                        url=full_url,
+                        title=title[:200],
                         source="MEA",
-                        source_type="rss",
+                        source_type="scrape",
                         ministry="Ministry of External Affairs",
-                        pub_date=item.pub_date.content if hasattr(item, "pub_date") and item.pub_date else "",
-                        description=item.description.content if item.description else "",
                         fetched_at=datetime.now(_IST),
                     ))
             except Exception as e:
-                logger.error(f"MEA feed parse failed ({feed_url}): {e}")
+                logger.warning(f"MEA fetch failed ({feed_url}): {e}")
         logger.info(f"MEA: fetched {len(docs)} documents")
         return docs
 
@@ -222,8 +278,9 @@ class ParliamentScraper(BaseGovScraper):
     """Lok Sabha and Rajya Sabha proceedings RSS."""
 
     PARLIAMENT_FEEDS: list[tuple[str, str]] = [
-        ("Lok Sabha Q&A", "https://loksabha.nic.in/rss/questionlist.aspx"),
-        ("Rajya Sabha", "https://rajyasabha.nic.in/rss/questionlist.aspx"),
+        # loksabha.nic.in / rajyasabha.nic.in DNS fails consistently — disabled
+        # ("Lok Sabha Q&A", "https://loksabha.nic.in/rss/questionlist.aspx"),
+        # ("Rajya Sabha",   "https://rajyasabha.nic.in/rss/questionlist.aspx"),
     ]
 
     def __init__(self, circuit_breaker: Optional[CircuitBreaker] = None):
@@ -252,7 +309,14 @@ class ParliamentScraper(BaseGovScraper):
                         fetched_at=datetime.now(_IST),
                     ))
             except Exception as e:
-                logger.error(f"Parliament RSS parse failed ({feed_url}): {e}")
+                content_type = resp.headers.get("Content-Type", "") if resp else ""
+                if "received HTML instead of RSS/XML" in str(e):
+                    logger.warning(
+                        f"Parliament feed unavailable as RSS ({feed_url}) "
+                        f"[content-type={content_type}, final_url={resp.url}]"
+                    )
+                else:
+                    logger.error(f"Parliament RSS parse failed ({feed_url}): {e}")
         logger.info(f"Parliament: fetched {len(docs)} documents")
         return docs
 
@@ -263,8 +327,9 @@ class DRDOScraper(BaseGovScraper):
     """DRDO (Defence Research and Development Organisation) press releases."""
 
     DRDO_FEEDS: list[tuple[str, str]] = [
-        ("DRDO News", "https://www.drdo.gov.in/rss-feeds/latest-news"),
-        ("DRDO Technologies", "https://www.drdo.gov.in/rss-feeds/technology-transfer"),
+        # DRDO RSS paths return 404 — their site no longer serves these feeds
+        # ("DRDO News",       "https://www.drdo.gov.in/rss-feeds/latest-news"),
+        # ("DRDO Technologies","https://www.drdo.gov.in/rss-feeds/technology-transfer"),
     ]
 
     def __init__(self, circuit_breaker: Optional[CircuitBreaker] = None):
@@ -293,7 +358,14 @@ class DRDOScraper(BaseGovScraper):
                         fetched_at=datetime.now(_IST),
                     ))
             except Exception as e:
-                logger.error(f"DRDO RSS parse failed ({feed_url}): {e}")
+                content_type = resp.headers.get("Content-Type", "") if resp else ""
+                if "received HTML instead of RSS/XML" in str(e):
+                    logger.warning(
+                        f"DRDO feed unavailable as RSS ({feed_url}) "
+                        f"[content-type={content_type}, final_url={resp.url}]"
+                    )
+                else:
+                    logger.error(f"DRDO RSS parse failed ({feed_url}): {e}")
         logger.info(f"DRDO: fetched {len(docs)} documents")
         return docs
 

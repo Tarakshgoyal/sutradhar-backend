@@ -11,10 +11,9 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 from gliner2 import GLiNER2
 from langchain_ollama import ChatOllama
-from langchain_groq import ChatGroq
 
 
-LLM_TIMEOUT_SECONDS = 60  # skip article if LLM takes longer than this
+LLM_TIMEOUT_SECONDS = 300  # allow up to 5 min for local Ollama models
 
 from scrapers.news_rss import Article
 from graphs.schemas import (
@@ -102,16 +101,13 @@ class ExtractionAgent:
         )
 
         logger.info("Loading LLM for enrichment …")
-        # self.llm = ChatOllama(
-        #     model=model, num_predict=2048,  
-        # ).with_structured_output(LLMEnrichment)
-        self.llm = ChatGroq(
-            model_name=model,
-            max_tokens=2048,  
+        self.llm = ChatOllama(
+            model="gpt-oss:120b-cloud",
+            num_predict=2048,
         ).with_structured_output(LLMEnrichment, method="json_schema")
-        self.canon_llm = ChatGroq(
-            model_name=model,
-            max_tokens=2048,
+        self.canon_llm = ChatOllama(
+            model="gpt-oss:120b-cloud",
+            num_predict=2048,
         ).with_structured_output(CanonicalizationResult, method="json_schema")
         self._executor = ThreadPoolExecutor(max_workers=1)
 

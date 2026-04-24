@@ -15,6 +15,14 @@ from agents.inference import InferenceAgent
 
 logger = logging.getLogger(__name__)
 
+# Use causal-chain swarm when available, fall back to base InferenceAgent
+_CAUSAL_SWARM_AVAILABLE = False
+try:
+    from swarm.causal_swarm import CausalChainSwarm
+    _CAUSAL_SWARM_AVAILABLE = True
+except ImportError:
+    pass
+
 
 class ReportOrchestrator:
     """Orchestrates multi-agent report generation.
@@ -22,15 +30,20 @@ class ReportOrchestrator:
     Pipeline:
         1. ReportAgent.generate_with_context() → domain briefing + raw data
         2. IndiaImpactAgent.analyze()           → India impact analysis
-        3. InferenceAgent.analyze()             → causal chains, impact, weak links
+        3. CausalChainSwarm.analyze()           → 7 hypothesis workers + 3 critics
+           (falls back to InferenceAgent if swarm unavailable)
         4. Merge into unified report
     """
 
     def __init__(self, model: str = "openai/gpt-oss-20b"):
         self.report_agent = ReportAgent(model=model)
         self.india_impact_agent = IndiaImpactAgent(model=model)
-        self.inference_agent = InferenceAgent(model=model)
-        logger.info("ReportOrchestrator initialized (ReportAgent + IndiaImpactAgent + InferenceAgent)")
+        if _CAUSAL_SWARM_AVAILABLE:
+            self.inference_agent = CausalChainSwarm(model=model)
+            logger.info("ReportOrchestrator initialized (ReportAgent + IndiaImpactAgent + CausalChainSwarm)")
+        else:
+            self.inference_agent = InferenceAgent(model=model)
+            logger.info("ReportOrchestrator initialized (ReportAgent + IndiaImpactAgent + InferenceAgent)")
 
     def close(self):
         self.report_agent.close()

@@ -33,7 +33,7 @@ from pydantic import BaseModel, Field
 from langchain_core.output_parsers import JsonOutputParser
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from langchain_groq import ChatGroq
+from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, StateGraph
 from neo4j import GraphDatabase, Query
 from sqlalchemy import select
@@ -277,12 +277,12 @@ class GraphChatAgent:
     """LangGraph agent that answers questions using the Neo4j knowledge graph."""
 
     def __init__(self, model: str = "openai/gpt-oss-120b"):
-        self.llm = ChatGroq(model_name=model, temperature=0, max_tokens=4096)
+        self.llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0, num_predict=4096)
         self.driver = GraphDatabase.driver(NEO4J_URI, auth=NEO4J_AUTH)
 
         # Cypher generation: LLM -> JSON parser
         self.cypher_parser = JsonOutputParser(pydantic_object=CypherQueryPlan)
-        self.cypher_llm = ChatGroq(model_name=model, temperature=0, max_tokens=4096)
+        self.cypher_llm = ChatOllama(model="gpt-oss:120b-cloud", temperature=0, num_predict=4096)
         self.cypher_system = CYPHER_SYSTEM + "\n" + self.cypher_parser.get_format_instructions()
 
         self.graph = self._build_graph()

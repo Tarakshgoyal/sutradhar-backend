@@ -1,15 +1,15 @@
 ENRICHMENT_PROMPT = """You are an intelligence analyst. Entities and relationships have already been extracted from this article by an NER model. Your tasks:
 
 1. ENRICH RELATIONS — for each relation listed below, determine:
-   - causal: Is it a cause-effect relationship?
+   - causal: Is it a cause-effect relationship? (true/false)
    - temporal: What is the time marker? A date ("2024-03"), period ("Q1 2025"), status ("ongoing", "announced", "concluded"), or null if unknown.
    Copy source, target, and relation EXACTLY as given.
 
 2. EXTRACT EVENTS — identify up to 5 named events with:
    - name: short descriptive name
    - date: when it occurred or "ongoing"
-   - status: ongoing / concluded / announced / rumored
-   - entities: which of the pre-extracted entity names are involved (use exact names)
+   - status: one of: ongoing / concluded / announced / rumored
+   - entities: which of the pre-extracted entity names are involved (use exact names from the list)
 
 Pre-extracted entities: {entities}
 
@@ -21,13 +21,32 @@ Title: {title}
 Source: {source}
 Published: {pub_date}
 
-{text}"""
+{text}
+
+IMPORTANT: You MUST respond with ONLY valid JSON. No markdown, no bullet points, no prose.
+Use this exact JSON structure:
+{{
+  "relation_enrichments": [
+    {{"source": "...", "target": "...", "relation": "...", "causal": false, "temporal": null}}
+  ],
+  "events": [
+    {{"name": "...", "date": "...", "status": "...", "entities": ["..."]}}
+  ]
+}}"""
 
 
 RESOLUTION_PROMPT = """You are an entity resolution expert. Given these candidate pairs of entities that might refer to the same real-world entity, determine which ones should be merged.
 
-Only merge if they DEFINITELY refer to the same entity. If unsure, do NOT merge.
-Pay attention to entity types.
+Rules:
+- Only merge if they DEFINITELY refer to the same real-world entity. If unsure, do NOT merge.
+- NEVER merge a country with a political party, alliance, or coalition (e.g. "India" ≠ "INDIA Alliance").
+- NEVER merge across entity types (Country ≠ Organization ≠ Person).
+- When merging, the canonical name should be the SHORT, well-known form (e.g. "India" not "Republic of India", "United States" not "United States of America").
+- Acronyms of organizations should merge INTO their full name (e.g. "BJP" → "Bharatiya Janata Party").
+
+Respond with ONLY valid JSON:
+{{"merges": [{{"merge_into": "...", "canonical": "...", "confidence": 0.95}}]}}
+If nothing should be merged, respond: {{"merges": []}}
 
 Candidate pairs:
 {pairs}

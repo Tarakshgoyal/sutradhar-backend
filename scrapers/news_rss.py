@@ -21,6 +21,49 @@ from rss_parser import RSSParser
 
 logger = logging.getLogger(__name__)
 
+_UTF8_BOM = b"\xef\xbb\xbf"
+
+
+def _payload_preview(raw: bytes, limit: int = 140) -> str:
+    """Return a short, log-safe preview of a response payload."""
+    if not raw:
+        return ""
+    snippet = raw[:limit].decode("utf-8", errors="replace")
+    return re.sub(r"\s+", " ", snippet).strip()
+
+
+def _looks_like_non_rss(raw: bytes, content_type: str) -> bool:
+    """Detect obvious non-RSS payloads (HTML/JSON/challenge pages)."""
+    ct = (content_type or "").lower()
+    sniff = raw[:240].lstrip().lower()
+    if "json" in ct or sniff.startswith(b"{") or sniff.startswith(b"["):
+        return True
+    if "html" in ct or sniff.startswith(b"<!doctype html") or sniff.startswith(b"<html"):
+        return True
+    return False
+
+
+def _parse_rss_response(response: requests.Response):
+    """Parse RSS response robustly across bytes/text parser behaviors."""
+    raw = response.content or b""
+    if raw.startswith(_UTF8_BOM):
+        raw = raw[len(_UTF8_BOM):]
+    raw = raw.lstrip()
+
+    content_type = response.headers.get("Content-Type", "")
+    if _looks_like_non_rss(raw, content_type):
+        raise ValueError(
+            f"non-RSS payload (content-type={content_type!r}, preview={_payload_preview(raw)!r})"
+        )
+
+    # Most versions of rss_parser accept bytes.
+    try:
+        return RSSParser.parse(raw)
+    except Exception:
+        # Some environments/parsers behave better with text.
+        text_payload = raw.decode(response.encoding or "utf-8", errors="replace")
+        return RSSParser.parse(text_payload)
+
 
 def _parse_pub_date(date_str: str) -> Optional[datetime]:
     """Parse an RSS pub_date string into a timezone-aware datetime. Returns None on failure."""
@@ -91,18 +134,42 @@ class Article:
         if not self.content_hash and self.url:
             self.content_hash = hashlib.sha256(self.url.encode()).hexdigest()[:16]
 
+    # Domains that block newspaper3k — skip content extraction entirely
+    _BLOCKED_DOMAINS = {
+        "yourstory.com", "washingtonpost.com", "wsj.com",
+        "nytimes.com", "ft.com", "bloomberg.com",
+        "foreignaffairs.com", "techcrunch.com",
+        "warontherocks.com", "brookings.edu",
+    }
+
     def extract_content(self, timeout: int = 10) -> bool:
         """
         Download and parse the full article content using newspaper3k.
 
         Returns True if extraction succeeded, False otherwise.
         """
+        # Skip domains that consistently block scrapers (saves time & log noise)
         try:
-            article = newspaper.Article(self.url)
+            from urllib.parse import urlparse
+            domain = urlparse(self.url).netloc.lower().lstrip("www.")
+            if any(domain.endswith(blocked) for blocked in self._BLOCKED_DOMAINS):
+                self.is_content_extracted = False
+                return False
+        except Exception:
+            pass
+
+        try:
+            article = newspaper.Article(self.url, request_timeout=timeout)
             article.download()
             article.parse()
 
-            self.full_text = article.text
+            text = article.text or ""
+            # Reject paywalled/empty extractions
+            if len(text.strip()) < 80:
+                self.is_content_extracted = False
+                return False
+
+            self.full_text = text
             self.authors = article.authors
             self.top_image = article.top_image or ""
             self.images = list(article.images) if article.images else []
@@ -118,7 +185,12 @@ class Article:
             return True
 
         except Exception as e:
-            logger.error(f"Failed to extract content from {self.url}: {e}")
+            err = str(e)
+            # Suppress noisy known-failure messages; log others as warning not error
+            if "403" in err or "download()" in err or "Forbidden" in err:
+                logger.debug(f"Skipped (blocked): {self.url}")
+            else:
+                logger.warning(f"Failed to extract content from {self.url}: {e}")
             self.is_content_extracted = False
             return False
 
@@ -256,9 +328,12 @@ class NewsRSSScraper:
                 break
 
             try:
-                rss = RSSParser.parse(response.text)
+                rss = _parse_rss_response(response)
             except Exception as e:
-                logger.error(f"Failed to parse RSS feed from {source_name}: {e}")
+                logger.error(
+                    f"Failed to parse RSS feed from {source_name}: {e} "
+                    f"(status={response.status_code}, url={response.url})"
+                )
                 break
 
             page_had_fresh_items = False
@@ -476,71 +551,71 @@ class NewsRSSScraper:
 def create_default_scraper() -> NewsRSSScraper:
     """Create a scraper pre-loaded with common news RSS feeds."""
     scraper = NewsRSSScraper()
-    # World
-    scraper.add_feed("Washington Post", "https://feeds.washingtonpost.com/rss/world")
-    scraper.add_feed("BBC", "https://feeds.bbci.co.uk/news/world/rss.xml")
-    # India
+
+    # ── India — General ───────────────────────────────────────────────────────
     scraper.add_feed("NDTV", "https://feeds.feedburner.com/ndtvnews-top-stories")
-    # India Today Nation
-    scraper.add_feed("India Today", "https://www.indiatoday.in/rss/1206514")
-    # India Today World
-    scraper.add_feed("India Today", "https://www.indiatoday.in/rss/1206577")
+    scraper.add_feed("NDTV", "https://feeds.feedburner.com/ndtvnews-india-news")
+    scraper.add_feed("NDTV", "https://feeds.feedburner.com/ndtvnews-world-news")
 
-    # The Hindu
+    scraper.add_feed("India Today", "https://www.indiatoday.in/rss/1206514")   # Nation
+    scraper.add_feed("India Today", "https://www.indiatoday.in/rss/1206577")   # World
+    scraper.add_feed("India Today", "https://www.indiatoday.in/rss/1206550")   # Business
+
     scraper.add_feed("The Hindu", "https://www.thehindu.com/news/feeder/default.rss")
-    # The Hindu World
     scraper.add_feed("The Hindu", "https://www.thehindu.com/news/international/feeder/default.rss")
-    # The Hindu States
     scraper.add_feed("The Hindu", "https://www.thehindu.com/news/states/feeder/default.rss")
-    # The Hindu Cities
-    scraper.add_feed("The Hindu", "https://www.thehindu.com/news/cities/feeder/default.rss")
-    # The Hindu Economy
     scraper.add_feed("The Hindu", "https://www.thehindu.com/business/Economy/feeder/default.rss")
-    # The Hindu Markets
-    scraper.add_feed("The Hindu", "https://www.thehindu.com/business/markets/feeder/default.rss")
-    # The Hindu Budget
-    scraper.add_feed("The Hindu", "https://www.thehindu.com/business/budget/feeder/default.rss")
 
-    # Live Mint
     scraper.add_feed("Live Mint", "https://www.livemint.com/rss/news")
-    # Live Mint Companies
     scraper.add_feed("Live Mint", "https://www.livemint.com/rss/companies")
-    # Live Mint Money
     scraper.add_feed("Live Mint", "https://www.livemint.com/rss/money")
-    # Live Mint Politics
     scraper.add_feed("Live Mint", "https://www.livemint.com/rss/politics")
-    # Live Mint AI
     scraper.add_feed("Live Mint", "https://www.livemint.com/rss/AI")
 
-    # Economic Times Defence
-    scraper.add_feed("Economic Times", "https://b2b.economictimes.indiatimes.com/rss/defence")
-
+    scraper.add_feed("Economic Times", "https://economictimes.indiatimes.com/rssfeedstopstories.cms")
+    scraper.add_feed("Economic Times", "https://economictimes.indiatimes.com/news/politics-and-nation/rssfeeds/1052732854.cms")
+    scraper.add_feed("Economic Times", "https://economictimes.indiatimes.com/news/international/rssfeeds/2147477.cms")
+    scraper.add_feed("Economic Times", "https://economictimes.indiatimes.com/industry/rssfeeds/13352306.cms")
 
     scraper.add_feed("India TV", "https://www.indiatvnews.com/rssnews/topstory.xml")
-    scraper.add_feed("India TV","https://www.indiatvnews.com/rssnews/topstory-world.xml")
-    scraper.add_feed("India TV","https://www.indiatvnews.com/rssnews/topstory-entertainment.xml")
-    scraper.add_feed("India TV","https://www.indiatvnews.com/rssnews/topstory-sports.xml")
-    scraper.add_feed("India TV","https://www.indiatvnews.com/rssnews/topstory-technology.xml")
-    scraper.add_feed("India TV","https://www.indiatvnews.com/rssnews/topstory-health.xml")
-    scraper.add_feed("India TV","https://www.indiatvnews.com/rssnews/topstory-lifestyle.xml")
-    scraper.add_feed("India TV","https://www.indiatvnews.com/rssnews/topstory-business.xml")
-    scraper.add_feed("India TV","https://www.indiatvnews.com/rssnews/topstory-education.xml")
-    scraper.add_feed("India TV","https://www.indiatvnews.com/rssnews/topstory-crime.xml")
+    scraper.add_feed("India TV", "https://www.indiatvnews.com/rssnews/topstory-world.xml")
+    scraper.add_feed("India TV", "https://www.indiatvnews.com/rssnews/topstory-business.xml")
 
-    # ── National Security & Defence ───────────────────────────────────────────
-    # Note: PIB, The Print, The Wire, and WION feeds removed due to persistent failures
+    scraper.add_feed("Hindustan Times", "https://www.hindustantimes.com/feeds/rss/india-news/rssfeed.xml")
+    scraper.add_feed("Hindustan Times", "https://www.hindustantimes.com/feeds/rss/world-news/rssfeed.xml")
+    scraper.add_feed("Hindustan Times", "https://www.hindustantimes.com/feeds/rss/business/rssfeed.xml")
 
-    # ── Geopolitics & Foreign Policy ──────────────────────────────────────────
-    scraper.add_feed("Foreign Affairs",    "https://www.foreignaffairs.com/rss.xml")
+    scraper.add_feed("Hindu Business Line", "https://www.thehindubusinessline.com/feeder/default.rss")
+    scraper.add_feed("Hindu Business Line", "https://www.thehindubusinessline.com/economy/feeder/default.rss")
+    scraper.add_feed("Hindu Business Line", "https://www.thehindubusinessline.com/markets/feeder/default.rss")
+    scraper.add_feed("Hindu Business Line", "https://www.thehindubusinessline.com/news/world/feeder/default.rss")
 
-    # ── Financial / Economic ──────────────────────────────────────────────────
-    # Note: Moneycontrol feeds removed due to persistent blocking
+    scraper.add_feed("Times Now", "https://www.timesnownews.com/feeds/gns-en-latest.xml")
 
-    # ── Technology & Science ──────────────────────────────────────────────────
-    scraper.add_feed("YourStory Tech",     "https://yourstory.com/feed")
+    scraper.add_feed("ANI News", "https://www.aninews.in/rss/feed/category/world/general-news.xml")
+    scraper.add_feed("ANI News", "https://www.aninews.in/rss/feed/category/national/general-news.xml")
+
+    scraper.add_feed("Scroll", "https://feeds.feedburner.com/ScrollinArticles.rss")
+
+    scraper.add_feed("The Quint", "https://www.thequint.com/feed")
+
+    # ORF has no public RSS feed anymore — removed
+
+    # ── International ─────────────────────────────────────────────────────────
+    scraper.add_feed("Al Jazeera",   "https://www.aljazeera.com/xml/rss/all.xml")
+    scraper.add_feed("The Diplomat", "https://thediplomat.com/feed/")
+    scraper.add_feed("DW News",      "https://rss.dw.com/xml/rss-en-all")
+    scraper.add_feed("AP News",      "https://feeds.feedburner.com/APWorldNews")
+
+    # ── Geopolitics & Policy ──────────────────────────────────────────────────
+    scraper.add_feed("Foreign Affairs",  "https://www.foreignaffairs.com/rss.xml")
+    scraper.add_feed("War on the Rocks", "https://warontherocks.com/feed/")
+
+    # ── Technology ────────────────────────────────────────────────────────────
+    scraper.add_feed("TechCrunch", "https://techcrunch.com/feed/")
 
     # ── Climate / Energy ──────────────────────────────────────────────────────
-    scraper.add_feed("Climate Home News",  "https://www.climatechangenews.com/feed/")
+    scraper.add_feed("Climate Home News", "https://www.climatechangenews.com/feed/")
 
     return scraper
 
